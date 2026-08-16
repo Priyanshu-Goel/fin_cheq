@@ -2,7 +2,8 @@ fastapi==0.115.0
 uvicorn[standard]==0.30.6
 pydantic==2.9.2
 pydantic-settings==2.5.2
-yfinance==0.2.43
+yfinance
+curl_cffi
 pandas==2.2.2
 numpy==1.26.4
 statsmodels==0.14.2
