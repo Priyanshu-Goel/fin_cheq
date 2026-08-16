@@ -59,6 +59,21 @@ _retry_yahoo = retry(
 )
 
 
+def _flatten_yahoo_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Newer yfinance versions return MultiIndex columns (field, ticker) even
+    for a single-ticker download. Left as-is, `df["Adj Close"]` silently
+    returns a 1-column DataFrame instead of a Series, which later breaks
+    any code doing boolean checks on it (e.g. `if returns.std() == 0:` in
+    analysis/risk.py raises "truth value of a Series is ambiguous"). Flatten
+    to plain single-level columns regardless of yfinance version.
+    """
+    if isinstance(df.columns, pd.MultiIndex):
+        df = df.copy()
+        df.columns = df.columns.get_level_values(0)
+    return df
+
+
 @_retry_yahoo
 def _fetch_daily_history_yahoo(symbol: str, exchange: str, years: int) -> pd.DataFrame:
     ticker = to_yahoo_ticker(symbol, exchange)
@@ -70,6 +85,7 @@ def _fetch_daily_history_yahoo(symbol: str, exchange: str, years: int) -> pd.Dat
     )
     if df.empty:
         raise ValueError(f"No price data returned for {ticker} from Yahoo Finance.")
+    df = _flatten_yahoo_columns(df)
     df.index.name = "Date"
     return df
 
@@ -113,7 +129,7 @@ def _fetch_index_uncached(index_symbol: str, years: int) -> pd.DataFrame:
     )
     if df.empty:
         raise ValueError(f"No index data returned for {index_symbol}.")
-    return df
+    return _flatten_yahoo_columns(df)
 
 
 def fetch_index_history(index_symbol: str = "^NSEI", years: int = 5) -> pd.DataFrame:
@@ -148,4 +164,9 @@ def fetch_index_history(index_symbol: str = "^NSEI", years: int = 5) -> pd.DataF
 
 
 def daily_returns(price_df: pd.DataFrame, price_col: str = "Adj Close") -> pd.Series:
-    return price_df[price_col].pct_change().dropna()
+    prices = price_df[price_col]
+    if isinstance(prices, pd.DataFrame):
+        # Defensive: guarantee a Series even if an upstream source ever
+        # hands back duplicate/MultiIndex columns for this field again.
+        prices = prices.iloc[:, 0]
+    return prices.pct_change().dropna()

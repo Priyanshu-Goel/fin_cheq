@@ -21,6 +21,7 @@ homepage with browser-like headers, then reusing that session for the
 actual data call - this mimics what a real browser does and is why a bare
 `requests.get` on the API URL alone returns 401/403.
 """
+import time
 from datetime import datetime, timedelta
 import pandas as pd
 import requests
@@ -34,14 +35,30 @@ HEADERS = {
     "Accept": "*/*",
 }
 
+# Cookies from the homepage handshake are valid for a while - reusing one
+# session across calls (instead of re-bootstrapping on every single price
+# fetch) roughly halves our request volume against NSE, which matters
+# because NSE rate-limits/blocks aggressively and re-bootstrapping on every
+# call was itself making that more likely.
+_SESSION_CACHE: dict[str, tuple[float, requests.Session]] = {}
+_SESSION_TTL_SECONDS = 10 * 60
 
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=3, min=3, max=30), reraise=True)
 def _bootstrap_session() -> requests.Session:
+    cached = _SESSION_CACHE.get("session")
+    if cached is not None:
+        cached_at, session = cached
+        if time.time() - cached_at < _SESSION_TTL_SECONDS:
+            return session
+
     session = requests.Session()
     session.headers.update(HEADERS)
     # Hitting the homepage first is required to get valid cookies - NSE's
     # API rejects requests that arrive without them.
-    session.get(BASE_URL, timeout=10)
-    session.get(f"{BASE_URL}/get-quotes/equity", timeout=10)
+    session.get(BASE_URL, timeout=15)
+    session.get(f"{BASE_URL}/get-quotes/equity", timeout=15)
+    _SESSION_CACHE["session"] = (time.time(), session)
     return session
 
 
