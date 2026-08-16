@@ -1,16 +1,19 @@
 """
 Orchestrates a full run for one company:
-  1. Resolve symbol -> fetch 5yr price history (yfinance) + Nifty50 index history
-  2. Fetch fundamentals: try indianapi.in first, fall back to Screener scraper
-  3. Compute ratios, CAPM, risk, red flags, backtest
-  4. Fetch + chunk + embed source documents (annual report/transcripts), store in Supabase
-  5. Retrieve relevant chunks, generate the RAG research note via Claude
-  6. Build Excel + PDF reports, save to /tmp (or wherever OUTPUT_DIR points)
+  1. Resolve symbol -> concurrently fetch 5yr price history (yfinance/NSE) +
+     Nifty50 index history + fundamentals (indianapi.in/Screener) + source
+     documents (annual report/transcripts) - these are all independent I/O
+     calls, so they run in parallel rather than one after another
+  2. Compute ratios, CAPM, risk, red flags, backtest
+  3. Chunk + embed source documents, store in Supabase
+  4. Retrieve relevant chunks, generate the RAG research note via Claude
+  5. Build Excel + PDF reports, save to /tmp (or wherever OUTPUT_DIR points)
 
 This is the single function main.py's /analyze route calls.
 """
 import os
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 from app.data_sources import price_data
 from app.data_sources.fundamentals_api import (
@@ -95,16 +98,25 @@ def _build_chart_price_history(price_df) -> list[PricePoint]:
 def run_full_analysis(req: AnalyzeRequest) -> AnalyzeResponse:
     nse_symbol = _resolve_symbol(req)
 
-    # 1. Price history
-    price_df = price_data.fetch_daily_history(nse_symbol, req.exchange, years=5)
-    index_df = price_data.fetch_index_history(years=5)
+    # 1. Price history, fundamentals, and source documents are all
+    # independent I/O calls - fetching them one after another was pure
+    # wasted wall-clock (each can take tens of seconds against
+    # slow/rate-limited providers). Run them concurrently instead.
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        price_future = pool.submit(price_data.fetch_daily_history, nse_symbol, req.exchange, 5)
+        index_future = pool.submit(price_data.fetch_index_history, years=5)
+        fundamentals_future = pool.submit(_get_fundamentals, nse_symbol, req.company_name)
+        documents_future = pool.submit(fetch_source_documents, nse_symbol)
+
+        price_df = price_future.result()
+        index_df = index_future.result()
+        fundamentals = fundamentals_future.result()
+        documents = documents_future.result()
+
     stock_returns = price_data.daily_returns(price_df)
     market_returns = price_data.daily_returns(index_df)
 
-    # 2. Fundamentals (API first, scraper fallback)
-    fundamentals = _get_fundamentals(nse_symbol, req.company_name)
-
-    # 3. Quantitative analysis
+    # 2. Quantitative analysis
     ratio_trends = compute_ratio_trends(
         fundamentals.get("ratios_5yr", {}), fundamentals.get("profit_loss", {})
     )
@@ -121,15 +133,14 @@ def run_full_analysis(req: AnalyzeRequest) -> AnalyzeResponse:
     )
     save_backtest_result(nse_symbol, backtest_result)
 
-    # 4. RAG: fetch source docs, chunk, embed, store
-    documents = fetch_source_documents(nse_symbol)
+    # 3. RAG: chunk + embed the source documents fetched above, store
     chunks = chunk_documents(documents)
     store_chunks(nse_symbol, chunks)
     retrieved = retrieve_relevant_chunks(
         nse_symbol, query=f"{req.company_name} financial performance and outlook", top_k=6
     )
 
-    # 5. Generate the qualitative note
+    # 4. Generate the qualitative note
     quant_summary_text = _build_quant_summary_text(
         ratio_trends, capm_result, risk_result, red_flags, backtest_result
     )
@@ -150,7 +161,7 @@ def run_full_analysis(req: AnalyzeRequest) -> AnalyzeResponse:
         pdf_url="",
     )
 
-    # 6. Build downloadable reports
+    # 5. Build downloadable reports
     run_id = uuid.uuid4().hex[:8]
     excel_path = os.path.join(OUTPUT_DIR, f"{nse_symbol}_{run_id}.xlsx")
     pdf_path = os.path.join(OUTPUT_DIR, f"{nse_symbol}_{run_id}.pdf")

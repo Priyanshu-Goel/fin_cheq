@@ -44,8 +44,17 @@ _SESSION_CACHE: dict[str, tuple[float, requests.Session]] = {}
 _SESSION_TTL_SECONDS = 10 * 60
 
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=3, min=3, max=30), reraise=True)
+@retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=2, min=2, max=6), reraise=True)
 def _bootstrap_session() -> requests.Session:
+    """
+    Kept to 2 attempts / a short backoff, not more: this now runs racing
+    against Yahoo Finance (see price_data._race_providers), so a stubborn
+    retry budget here just delays surfacing an error the concurrent Yahoo
+    attempt may already be past. A read-timeout on a fully-blocked NSE
+    endpoint previously cost ~3 attempts * 15s + backoff (~65s+) - with an
+    independent provider racing alongside, failing fast here matters more
+    than being individually resilient.
+    """
     cached = _SESSION_CACHE.get("session")
     if cached is not None:
         cached_at, session = cached
@@ -56,8 +65,8 @@ def _bootstrap_session() -> requests.Session:
     session.headers.update(HEADERS)
     # Hitting the homepage first is required to get valid cookies - NSE's
     # API rejects requests that arrive without them.
-    session.get(BASE_URL, timeout=15)
-    session.get(f"{BASE_URL}/get-quotes/equity", timeout=15)
+    session.get(BASE_URL, timeout=10)
+    session.get(f"{BASE_URL}/get-quotes/equity", timeout=10)
     _SESSION_CACHE["session"] = (time.time(), session)
     return session
 
@@ -72,7 +81,7 @@ def _chunk_date_ranges(start: datetime, end: datetime, chunk_days: int = 364):
         current = chunk_end + timedelta(days=1)
 
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=3, min=3, max=30), reraise=True)
+@retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=2, min=2, max=8), reraise=True)
 def _fetch_chunk(session: requests.Session, symbol: str, start: datetime, end: datetime) -> list[dict]:
     url = f"{BASE_URL}/api/historical/cm/equity"
     params = {
@@ -81,7 +90,7 @@ def _fetch_chunk(session: requests.Session, symbol: str, start: datetime, end: d
         "from": start.strftime("%d-%m-%Y"),
         "to": end.strftime("%d-%m-%Y"),
     }
-    resp = session.get(url, params=params, timeout=15)
+    resp = session.get(url, params=params, timeout=10)
     resp.raise_for_status()
     payload = resp.json()
     return payload.get("data", [])

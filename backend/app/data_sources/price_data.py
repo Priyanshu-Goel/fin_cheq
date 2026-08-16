@@ -1,6 +1,9 @@
 """
-Price history via yfinance (primary) with an automatic fallback to NSE's
-own direct historical data endpoint (nse_direct.py) if Yahoo fails.
+Price history via yfinance and NSE's own direct historical data endpoint
+(nse_direct.py), raced concurrently so whichever provider isn't currently
+blocked wins - trying one to exhaustion before even attempting the other
+means a genuine outage on either side costs the full sum of both retry
+budgets (observed: ~90s) instead of the max of the two.
 NSE tickers use a `.NS` suffix, BSE tickers use `.BO`.
 
 IMPORTANT — cloud hosting note:
@@ -10,11 +13,13 @@ reported issue throughout 2025-2026 (see
 https://github.com/ranaroussi/yfinance/issues/2422). This module:
   1. Impersonates a real browser via curl_cffi (bypasses outright blocking -
      without this you'd see "Expecting value: line 1 column 1" errors).
-  2. Retries with real exponential backoff (tens of seconds), since
-     YFRateLimitError needs genuine cool-down time, not a quick retry.
-  3. Falls back automatically to NSE's own direct endpoint if Yahoo still
-     fails after retries - a different provider with an independent block
-     list, so one being down doesn't necessarily mean the other is too.
+  2. Retries with a short exponential backoff for transient blips, but
+     deliberately not a long one - if the block is real (common per the
+     issue above), a large retry budget just delays the inevitable failure
+     rather than recovering.
+  3. Races Yahoo against NSE-direct concurrently (a different provider with
+     an independent block list) instead of trying them sequentially, and
+     returns whichever succeeds first.
   4. Caches the Nifty 50 index history in memory, since it's identical for
      every company analyzed and re-fetching it on every request was
      needlessly doubling our request volume against both providers.
@@ -24,7 +29,9 @@ temporary outage/block - wait 10-15 minutes between test runs rather than
 retrying immediately, which only extends the cool-down.
 """
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
+from typing import Callable
 import pandas as pd
 import yfinance as yf
 from curl_cffi import requests as curl_requests
@@ -52,11 +59,35 @@ def to_yahoo_ticker(symbol: str, exchange: str = "NSE") -> str:
 
 
 _retry_yahoo = retry(
-    stop=stop_after_attempt(4),
-    wait=wait_exponential(multiplier=5, min=5, max=60),  # 5s, 10s, 20s, 40s...
+    stop=stop_after_attempt(2),
+    wait=wait_exponential(multiplier=2, min=2, max=8),  # 2s, 8s...
     retry=retry_if_exception_type(Exception),
     reraise=True,
 )
+
+
+def _race_providers(fetchers: dict[str, Callable[[], pd.DataFrame]]) -> tuple[pd.DataFrame | None, dict[str, Exception]]:
+    """
+    Runs each named fetch function concurrently and returns the first
+    successful result immediately, without waiting for slower/failing
+    providers to finish. If all fail, returns (None, {name: error, ...})
+    so the caller can build a provider-specific error message.
+    """
+    pool = ThreadPoolExecutor(max_workers=len(fetchers))
+    futures = {pool.submit(fn): name for name, fn in fetchers.items()}
+    errors: dict[str, Exception] = {}
+    try:
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                return future.result(), {}
+            except Exception as exc:
+                errors[name] = exc
+    finally:
+        # wait=False: don't block the caller on a losing/hung provider -
+        # its thread finishes on its own and the result is discarded.
+        pool.shutdown(wait=False)
+    return None, errors
 
 
 def _flatten_yahoo_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -96,27 +127,26 @@ def fetch_daily_history(symbol: str, exchange: str = "NSE", years: int = 5) -> p
     Open, High, Low, Close, Adj Close, Volume
     covering the trailing `years` years, day by day.
 
-    Tries Yahoo Finance first; if that fails (blocked/rate-limited - a known,
-    ongoing issue on shared cloud IPs), automatically falls back to NSE's own
-    direct historical data endpoint (nse_direct.py), which is a different
-    provider with an independent block list. Only if BOTH fail does this
-    raise, with a message explaining that's likely a temporary dual outage
-    rather than a bug.
+    Races Yahoo Finance against NSE's own direct historical data endpoint
+    (nse_direct.py) - a different provider with an independent block list -
+    and returns whichever succeeds first. Only if BOTH fail does this raise,
+    with a message explaining that's likely a temporary dual outage rather
+    than a bug.
     """
-    try:
-        return _fetch_daily_history_yahoo(symbol, exchange, years)
-    except Exception as yahoo_error:
-        try:
-            return fetch_daily_history_nse(symbol, years)
-        except Exception as nse_error:
-            raise ValueError(
-                f"Could not fetch price history for {symbol} from either "
-                f"source.\nYahoo Finance error: {yahoo_error}\n"
-                f"NSE-direct error: {nse_error}\n"
-                f"Both providers independently blocking/failing at once "
-                f"usually means a temporary IP-level rate limit - wait "
-                f"10-15 minutes before retrying."
-            ) from nse_error
+    df, errors = _race_providers({
+        "Yahoo Finance": lambda: _fetch_daily_history_yahoo(symbol, exchange, years),
+        "NSE-direct": lambda: fetch_daily_history_nse(symbol, years),
+    })
+    if df is not None:
+        return df
+    raise ValueError(
+        f"Could not fetch price history for {symbol} from either source.\n"
+        f"Yahoo Finance error: {errors.get('Yahoo Finance')}\n"
+        f"NSE-direct error: {errors.get('NSE-direct')}\n"
+        f"Both providers independently blocking/failing at once "
+        f"usually means a temporary IP-level rate limit - wait "
+        f"10-15 minutes before retrying."
+    )
 
 
 @_retry_yahoo
@@ -136,9 +166,9 @@ def fetch_index_history(index_symbol: str = "^NSEI", years: int = 5) -> pd.DataF
     """
     Default is the Nifty 50 (^NSEI) - used as the market proxy for CAPM beta.
     Cached in memory across requests since it's identical for every company
-    (this alone roughly halves our request volume under load). Falls back
-    to NSE's own index-history endpoint if Yahoo fails, same as
-    fetch_daily_history above.
+    (this alone roughly halves our request volume under load). Races
+    against NSE's own index-history endpoint if Yahoo is slow/blocked, same
+    as fetch_daily_history above.
     """
     cache_key = f"{index_symbol}:{years}"
     cached = _INDEX_CACHE.get(cache_key)
@@ -147,17 +177,17 @@ def fetch_index_history(index_symbol: str = "^NSEI", years: int = 5) -> pd.DataF
         if time.time() - cached_at < _INDEX_CACHE_TTL_SECONDS:
             return df
 
-    try:
-        df = _fetch_index_uncached(index_symbol, years)
-    except Exception as yahoo_error:
-        try:
-            df = fetch_index_history_nse("NIFTY 50", years)
-        except Exception as nse_error:
-            raise ValueError(
-                f"Could not fetch index history from either source.\n"
-                f"Yahoo Finance error: {yahoo_error}\nNSE-direct error: {nse_error}\n"
-                f"Wait 10-15 minutes before retrying."
-            ) from nse_error
+    df, errors = _race_providers({
+        "Yahoo Finance": lambda: _fetch_index_uncached(index_symbol, years),
+        "NSE-direct": lambda: fetch_index_history_nse("NIFTY 50", years),
+    })
+    if df is None:
+        raise ValueError(
+            f"Could not fetch index history from either source.\n"
+            f"Yahoo Finance error: {errors.get('Yahoo Finance')}\n"
+            f"NSE-direct error: {errors.get('NSE-direct')}\n"
+            f"Wait 10-15 minutes before retrying."
+        )
 
     _INDEX_CACHE[cache_key] = (time.time(), df)
     return df

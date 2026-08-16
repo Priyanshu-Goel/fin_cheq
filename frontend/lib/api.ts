@@ -74,9 +74,11 @@ export async function analyzeCompany(
   exchange: string = "NSE"
 ): Promise<AnalyzeResponse> {
   const controller = new AbortController();
-  // Generous timeout: Render free-tier cold start (~30-50s) + scraping +
-  // embeddings + LLM call can genuinely take a while on a cold instance.
-  const timeoutId = setTimeout(() => controller.abort(), 120_000);
+  // Generous timeout: a full run does 5yr price history (yfinance/NSE) +
+  // fundamentals scraping + document embeddings + an LLM call + PDF/Excel
+  // generation, which can genuinely take over a minute even on a warm
+  // backend - on top of a cold Render instance waking up (~30-50s).
+  const timeoutId = setTimeout(() => controller.abort(), 150_000);
 
   let res: Response;
   try {
@@ -93,7 +95,7 @@ export async function analyzeCompany(
   } catch (e: any) {
     if (e.name === "AbortError") {
       throw new Error(
-        "The request timed out. If this is the first request in a while, the backend may still be waking up — please try again in a moment."
+        "The request is taking longer than expected (over 2.5 minutes) and was cancelled. This can happen on a cold backend instance, or when the underlying market data providers are temporarily rate-limiting requests. Please try again in a moment, or wait 10-15 minutes if it keeps happening."
       );
     }
     throw new Error(
