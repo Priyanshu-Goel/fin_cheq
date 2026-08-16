@@ -39,9 +39,18 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 
 from app.data_sources.nse_direct import fetch_daily_history_nse, fetch_index_history_nse
 
-# A single shared impersonating session, reused across all calls in this
-# process. "chrome" mimics a current desktop Chrome's fingerprint.
-_SESSION = curl_requests.Session(impersonate="chrome")
+# NOTE: deliberately NOT a shared module-level session. curl_cffi's Session
+# wraps a libcurl handle that is not safe for concurrent use across threads -
+# now that Yahoo/NSE are raced concurrently and the pipeline fetches price
+# and index history in parallel (see pipeline.py), two threads can end up
+# hitting the same session at once. That was silently corrupting requests -
+# manifesting as Yahoo returning an empty result instead of an explicit
+# error, at every window size, which is what tipped this off (a real
+# throttle would still fail on a large window and succeed on a small one;
+# this failed identically regardless of size). A fresh session per call
+# costs a little setup time but guarantees no cross-thread sharing.
+def _new_yahoo_session() -> curl_requests.Session:
+    return curl_requests.Session(impersonate="chrome")
 
 # In-memory cache for the market index (same for every company request).
 # TTL of 6 hours is plenty since this is only used for a daily-return
@@ -132,7 +141,7 @@ def _fetch_daily_history_yahoo(symbol: str, exchange: str, years: int) -> pd.Dat
     start = end - timedelta(days=365 * years + 30)  # small buffer
     df = yf.download(
         ticker, start=start, end=end, progress=False,
-        auto_adjust=False, session=_SESSION,
+        auto_adjust=False, session=_new_yahoo_session(),
     )
     if df.empty:
         raise ValueError(f"No price data returned for {ticker} from Yahoo Finance.")
@@ -185,7 +194,7 @@ def _fetch_index_uncached(index_symbol: str, years: int) -> pd.DataFrame:
     start = end - timedelta(days=365 * years + 30)
     df = yf.download(
         index_symbol, start=start, end=end, progress=False,
-        auto_adjust=False, session=_SESSION,
+        auto_adjust=False, session=_new_yahoo_session(),
     )
     if df.empty:
         raise ValueError(f"No index data returned for {index_symbol}.")

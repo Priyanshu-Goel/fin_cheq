@@ -21,7 +21,6 @@ homepage with browser-like headers, then reusing that session for the
 actual data call - this mimics what a real browser does and is why a bare
 `requests.get` on the API URL alone returns 401/403.
 """
-import time
 from datetime import datetime, timedelta
 import pandas as pd
 import requests
@@ -35,39 +34,29 @@ HEADERS = {
     "Accept": "*/*",
 }
 
-# Cookies from the homepage handshake are valid for a while - reusing one
-# session across calls (instead of re-bootstrapping on every single price
-# fetch) roughly halves our request volume against NSE, which matters
-# because NSE rate-limits/blocks aggressively and re-bootstrapping on every
-# call was itself making that more likely.
-_SESSION_CACHE: dict[str, tuple[float, requests.Session]] = {}
-_SESSION_TTL_SECONDS = 10 * 60
-
 
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=2, min=2, max=6), reraise=True)
 def _bootstrap_session() -> requests.Session:
     """
-    Kept to 2 attempts / a short backoff, not more: this now runs racing
-    against Yahoo Finance (see price_data._race_providers), so a stubborn
-    retry budget here just delays surfacing an error the concurrent Yahoo
-    attempt may already be past. A read-timeout on a fully-blocked NSE
-    endpoint previously cost ~3 attempts * 15s + backoff (~65s+) - with an
-    independent provider racing alongside, failing fast here matters more
-    than being individually resilient.
-    """
-    cached = _SESSION_CACHE.get("session")
-    if cached is not None:
-        cached_at, session = cached
-        if time.time() - cached_at < _SESSION_TTL_SECONDS:
-            return session
+    Deliberately NOT cached/shared across calls: requests.Session wraps a
+    cookiejar that is not safe for concurrent use from multiple threads,
+    and now that Yahoo/NSE race concurrently and the pipeline fetches
+    price/index history in parallel (see price_data.py / pipeline.py), a
+    shared session here could be hit by two threads at once and corrupt
+    its cookie state - the exact same class of bug fixed for the Yahoo
+    session in price_data.py. A fresh handshake per call costs 2 extra
+    requests but guarantees correctness.
 
+    Kept to 2 attempts / a short backoff, not more: this runs racing
+    against Yahoo Finance, so a stubborn retry budget here just delays
+    surfacing an error the concurrent Yahoo attempt may already be past.
+    """
     session = requests.Session()
     session.headers.update(HEADERS)
     # Hitting the homepage first is required to get valid cookies - NSE's
     # API rejects requests that arrive without them.
     session.get(BASE_URL, timeout=10)
     session.get(f"{BASE_URL}/get-quotes/equity", timeout=10)
-    _SESSION_CACHE["session"] = (time.time(), session)
     return session
 
 
