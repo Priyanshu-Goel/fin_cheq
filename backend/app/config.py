@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     indian_api_key: str = ""
     indian_api_base_url: str = "https://stock.indianapi.in"
 
+    hf_api_token: str = ""
+
     backtest_years_ago: int = 3
     cors_allow_origin: str = "http://localhost:3000"
 
