@@ -90,6 +90,26 @@ def _race_providers(fetchers: dict[str, Callable[[], pd.DataFrame]]) -> tuple[pd
     return None, errors
 
 
+def _year_ladder(years: int) -> list[int]:
+    """
+    Descending list of window sizes to try, e.g. 5 -> [5, 3, 2, 1].
+    Yahoo has been observed to return a genuinely empty result (not a
+    rate-limit exception) for a large date-range request while the same
+    ticker succeeds on a smaller one - consistent with a soft throttle on
+    request size/cost rather than a hard IP block. Rather than fail
+    outright, each window is tried in turn; partial history is far more
+    useful to the user than none. Downstream analysis doesn't require
+    exactly `years` of data - CAPM/risk work off whatever length comes
+    back, and the backtest independently shrinks its own lookback to fit.
+    """
+    candidates = [years, 3, 2, 1]
+    ladder = []
+    for y in candidates:
+        if 1 <= y <= years and y not in ladder:
+            ladder.append(y)
+    return ladder
+
+
 def _flatten_yahoo_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
     Newer yfinance versions return MultiIndex columns (field, ticker) even
@@ -129,20 +149,30 @@ def fetch_daily_history(symbol: str, exchange: str = "NSE", years: int = 5) -> p
 
     Races Yahoo Finance against NSE's own direct historical data endpoint
     (nse_direct.py) - a different provider with an independent block list -
-    and returns whichever succeeds first. Only if BOTH fail does this raise,
-    with a message explaining that's likely a temporary dual outage rather
-    than a bug.
+    and returns whichever succeeds first. If both fail for the requested
+    window, automatically retries with a shorter window (see _year_ladder)
+    before giving up - a large request is more likely to be silently
+    throttled than a small one. Only if every window fails on both
+    providers does this raise, with a message explaining that's likely a
+    temporary dual outage rather than a bug.
     """
-    df, errors = _race_providers({
-        "Yahoo Finance": lambda: _fetch_daily_history_yahoo(symbol, exchange, years),
-        "NSE-direct": lambda: fetch_daily_history_nse(symbol, years),
-    })
-    if df is not None:
-        return df
+    errors_by_window: dict[int, dict[str, Exception]] = {}
+    for window_years in _year_ladder(years):
+        df, errors = _race_providers({
+            "Yahoo Finance": lambda w=window_years: _fetch_daily_history_yahoo(symbol, exchange, w),
+            "NSE-direct": lambda w=window_years: fetch_daily_history_nse(symbol, w),
+        })
+        if df is not None:
+            return df
+        errors_by_window[window_years] = errors
+
+    smallest_window = min(errors_by_window)
+    last_errors = errors_by_window[smallest_window]
     raise ValueError(
-        f"Could not fetch price history for {symbol} from either source.\n"
-        f"Yahoo Finance error: {errors.get('Yahoo Finance')}\n"
-        f"NSE-direct error: {errors.get('NSE-direct')}\n"
+        f"Could not fetch price history for {symbol} from either source, even after "
+        f"shrinking the requested window down to {smallest_window} year(s).\n"
+        f"Yahoo Finance error: {last_errors.get('Yahoo Finance')}\n"
+        f"NSE-direct error: {last_errors.get('NSE-direct')}\n"
         f"Both providers independently blocking/failing at once "
         f"usually means a temporary IP-level rate limit - wait "
         f"10-15 minutes before retrying."
@@ -177,20 +207,26 @@ def fetch_index_history(index_symbol: str = "^NSEI", years: int = 5) -> pd.DataF
         if time.time() - cached_at < _INDEX_CACHE_TTL_SECONDS:
             return df
 
-    df, errors = _race_providers({
-        "Yahoo Finance": lambda: _fetch_index_uncached(index_symbol, years),
-        "NSE-direct": lambda: fetch_index_history_nse("NIFTY 50", years),
-    })
-    if df is None:
-        raise ValueError(
-            f"Could not fetch index history from either source.\n"
-            f"Yahoo Finance error: {errors.get('Yahoo Finance')}\n"
-            f"NSE-direct error: {errors.get('NSE-direct')}\n"
-            f"Wait 10-15 minutes before retrying."
-        )
+    errors_by_window: dict[int, dict[str, Exception]] = {}
+    for window_years in _year_ladder(years):
+        df, errors = _race_providers({
+            "Yahoo Finance": lambda w=window_years: _fetch_index_uncached(index_symbol, w),
+            "NSE-direct": lambda w=window_years: fetch_index_history_nse("NIFTY 50", w),
+        })
+        if df is not None:
+            _INDEX_CACHE[cache_key] = (time.time(), df)
+            return df
+        errors_by_window[window_years] = errors
 
-    _INDEX_CACHE[cache_key] = (time.time(), df)
-    return df
+    smallest_window = min(errors_by_window)
+    last_errors = errors_by_window[smallest_window]
+    raise ValueError(
+        f"Could not fetch index history from either source, even after shrinking the "
+        f"requested window down to {smallest_window} year(s).\n"
+        f"Yahoo Finance error: {last_errors.get('Yahoo Finance')}\n"
+        f"NSE-direct error: {last_errors.get('NSE-direct')}\n"
+        f"Wait 10-15 minutes before retrying."
+    )
 
 
 def daily_returns(price_df: pd.DataFrame, price_col: str = "Adj Close") -> pd.Series:

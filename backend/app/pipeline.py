@@ -27,7 +27,7 @@ from app.analysis.ratios import compute_ratio_trends
 from app.analysis.capm import compute_capm
 from app.analysis.risk import assess_risk
 from app.analysis.red_flags import detect_red_flags
-from app.analysis.backtest import run_backtest
+from app.analysis.backtest import run_backtest_adaptive
 
 from app.rag.chunker import chunk_documents
 from app.rag.vector_store import store_chunks, retrieve_relevant_chunks
@@ -128,7 +128,7 @@ def run_full_analysis(req: AnalyzeRequest) -> AnalyzeResponse:
         fundamentals.get("cash_flow", {}),
         fundamentals.get("profit_loss", {}),
     )
-    backtest_result = run_backtest(
+    backtest_result = run_backtest_adaptive(
         price_df, index_df, years_ago=settings.backtest_years_ago
     )
     save_backtest_result(nse_symbol, backtest_result)
