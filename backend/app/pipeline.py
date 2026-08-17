@@ -176,7 +176,13 @@ def run_full_analysis(req: AnalyzeRequest) -> AnalyzeResponse:
     backtest_result = run_backtest_adaptive(
         price_df, index_df, years_ago=settings.backtest_years_ago
     )
-    save_backtest_result(nse_symbol, backtest_result)
+    try:
+        # Persisting for the aggregate accuracy endpoint is a nice-to-have,
+        # not core to returning this company's analysis - a Supabase outage
+        # shouldn't fail an otherwise-successful request.
+        save_backtest_result(nse_symbol, backtest_result)
+    except Exception:
+        pass
 
     # 3. RAG: chunk + embed the source documents fetched above, store
     chunks = chunk_documents(documents)
@@ -201,7 +207,18 @@ def run_full_analysis(req: AnalyzeRequest) -> AnalyzeResponse:
     quant_summary_text = _build_quant_summary_text(
         ratio_trends, capm_result, risk_result, red_flags, backtest_result
     )
-    note_text = generate_research_note(req.company_name, retrieved, quant_summary_text)
+    try:
+        note_text = generate_research_note(req.company_name, retrieved, quant_summary_text)
+    except Exception:
+        # The LLM call is the last thing that could fail before we have a
+        # complete, useful response - a CometAPI outage/misconfiguration
+        # shouldn't discard real price/CAPM/risk/backtest results the user
+        # already has. Fall back to the raw quant summary as the note.
+        note_text = (
+            "AI-generated commentary is temporarily unavailable. Below is "
+            "the raw quantitative summary this note would normally be "
+            f"written from:\n\n{quant_summary_text}"
+        )
 
     analysis = AnalyzeResponse(
         company_name=req.company_name,
