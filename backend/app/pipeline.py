@@ -180,10 +180,22 @@ def run_full_analysis(req: AnalyzeRequest) -> AnalyzeResponse:
 
     # 3. RAG: chunk + embed the source documents fetched above, store
     chunks = chunk_documents(documents)
-    store_chunks(nse_symbol, chunks)
-    retrieved = retrieve_relevant_chunks(
-        nse_symbol, query=f"{req.company_name} financial performance and outlook", top_k=6
-    )
+    retrieved: list[str] = []
+    if chunks:
+        # Skip the embedding/retrieval round-trip entirely when there's
+        # nothing to retrieve (documents fetch is currently blocked - see
+        # reports_fetcher.py) - no point calling Hugging Face + Supabase
+        # just to get nothing back. Also wrapped defensively: if HF_API_TOKEN
+        # isn't configured or either service has a bad day, note_generator.py
+        # already handles an empty retrieved list by grounding only in the
+        # quantitative outputs, so this shouldn't fail the whole analysis.
+        try:
+            store_chunks(nse_symbol, chunks)
+            retrieved = retrieve_relevant_chunks(
+                nse_symbol, query=f"{req.company_name} financial performance and outlook", top_k=6
+            )
+        except Exception:
+            pass
 
     # 4. Generate the qualitative note
     quant_summary_text = _build_quant_summary_text(
