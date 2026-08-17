@@ -12,9 +12,13 @@ Orchestrates a full run for one company:
   2. Compute ratios, CAPM, risk, red flags, backtest
   3. Chunk + embed source documents, store in Supabase
   4. Retrieve relevant chunks, generate the RAG research note via Claude
-  5. Build Excel + PDF reports, save to /tmp (or wherever OUTPUT_DIR points)
+  5. Return the analysis immediately, with the Excel/PDF report paths
+     already assigned but the files not yet written - main.py schedules
+     build_reports() as a background task so the user gets everything
+     else without waiting on openpyxl/reportlab on top of an already-long
+     request. /downloads/{filename} 404s until the file actually exists.
 
-This is the single function main.py's /analyze route calls.
+run_full_analysis() is the single function main.py's /analyze route calls.
 """
 import os
 import uuid
@@ -116,7 +120,13 @@ def _build_chart_price_history(price_df) -> list[PricePoint]:
     return [PricePoint(date=str(idx.date()), close=round(float(val), 2)) for idx, val in weekly.items()]
 
 
-def run_full_analysis(req: AnalyzeRequest) -> AnalyzeResponse:
+def run_full_analysis(req: AnalyzeRequest) -> tuple[AnalyzeResponse, tuple]:
+    """
+    Returns (analysis, report_job). `report_job` is whatever build_reports()
+    needs - main.py passes it straight through to a BackgroundTask so the
+    Excel/PDF files get written after the response is already on its way
+    to the client.
+    """
     nse_symbol = _resolve_symbol(req)
 
     # 1. Price history, fundamentals, and source documents are all
@@ -219,6 +229,18 @@ def run_full_analysis(req: AnalyzeRequest) -> AnalyzeResponse:
             f"written from:\n\n{quant_summary_text}"
         )
 
+    # 5. The download paths are predictable, so the response can carry
+    # their final URLs immediately - the files themselves are written by
+    # build_reports() below, which main.py runs as a background task
+    # *after* sending this response. openpyxl/reportlab add real seconds
+    # on top of an already-long request; there's no reason to make the
+    # user wait on them when they already have everything else. The
+    # /downloads/{filename} route already 404s until a file exists, so
+    # the frontend can just poll it - no new endpoint needed.
+    run_id = uuid.uuid4().hex[:8]
+    excel_path = os.path.join(OUTPUT_DIR, f"{nse_symbol}_{run_id}.xlsx")
+    pdf_path = os.path.join(OUTPUT_DIR, f"{nse_symbol}_{run_id}.pdf")
+
     analysis = AnalyzeResponse(
         company_name=req.company_name,
         symbol=nse_symbol,
@@ -230,17 +252,18 @@ def run_full_analysis(req: AnalyzeRequest) -> AnalyzeResponse:
         red_flags=red_flags,
         backtest=backtest_result,
         price_history=_build_chart_price_history(price_df),
-        excel_url="",  # filled in below
-        pdf_url="",
+        excel_url=f"/downloads/{os.path.basename(excel_path)}",
+        pdf_url=f"/downloads/{os.path.basename(pdf_path)}",
     )
 
-    # 5. Build downloadable reports
-    run_id = uuid.uuid4().hex[:8]
-    excel_path = os.path.join(OUTPUT_DIR, f"{nse_symbol}_{run_id}.xlsx")
-    pdf_path = os.path.join(OUTPUT_DIR, f"{nse_symbol}_{run_id}.pdf")
+    report_job = (analysis, price_df, note_text, excel_path, pdf_path)
+    return analysis, report_job
+
+
+def build_reports(analysis: AnalyzeResponse, price_df, note_text: str, excel_path: str, pdf_path: str) -> None:
+    """Writes the Excel workbook and PDF note to disk. Run as a FastAPI
+    BackgroundTask (see main.py) so it happens after the response - the
+    files simply don't exist at the predicted paths until this finishes,
+    and /downloads/{filename} 404s until then."""
     build_excel_report(analysis, price_df, excel_path)
     build_pdf_report(analysis, note_text, pdf_path)
-
-    analysis.excel_url = f"/downloads/{os.path.basename(excel_path)}"
-    analysis.pdf_url = f"/downloads/{os.path.basename(pdf_path)}"
-    return analysis

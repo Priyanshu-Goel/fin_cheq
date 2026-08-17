@@ -1,12 +1,12 @@
 import os
 import traceback
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from app.config import settings
 from app.models import AnalyzeRequest, AnalyzeResponse
-from app.pipeline import run_full_analysis, OUTPUT_DIR
+from app.pipeline import run_full_analysis, build_reports, OUTPUT_DIR
 from app.db import get_aggregate_backtest_accuracy
 
 app = FastAPI(title="AI Equity Research Assistant")
@@ -25,9 +25,14 @@ def health():
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)
-def analyze(req: AnalyzeRequest):
+def analyze(req: AnalyzeRequest, background_tasks: BackgroundTasks):
     try:
-        return run_full_analysis(req)
+        analysis, report_job = run_full_analysis(req)
+        # Runs after this response is sent, not before - the user gets
+        # their analysis immediately; the Excel/PDF files appear at their
+        # (already-returned) URLs a few seconds later once this finishes.
+        background_tasks.add_task(build_reports, *report_job)
+        return analysis
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:  # noqa: BLE001 - surfaced to the user as a 500 with detail

@@ -75,10 +75,13 @@ export async function analyzeCompany(
 ): Promise<AnalyzeResponse> {
   const controller = new AbortController();
   // Generous timeout: a full run does 5yr price history (yfinance/NSE) +
-  // fundamentals scraping + document embeddings + an LLM call + PDF/Excel
-  // generation, which can genuinely take over a minute even on a warm
-  // backend - on top of a cold Render instance waking up (~30-50s).
-  const timeoutId = setTimeout(() => controller.abort(), 150_000);
+  // fundamentals scraping + document embeddings + an LLM call, which can
+  // genuinely take over a minute even on a warm backend - on top of a
+  // cold Render instance waking up (~30-50s, sometimes longer). Excel/PDF
+  // generation no longer counts against this: the backend returns the
+  // analysis as soon as it's ready and builds those in the background
+  // (see DownloadButtons, which polls for them separately).
+  const timeoutId = setTimeout(() => controller.abort(), 210_000);
 
   let res: Response;
   try {
@@ -95,7 +98,7 @@ export async function analyzeCompany(
   } catch (e: any) {
     if (e.name === "AbortError") {
       throw new Error(
-        "The request is taking longer than expected (over 2.5 minutes) and was cancelled. This can happen on a cold backend instance, or when the underlying market data providers are temporarily rate-limiting requests. Please try again in a moment, or wait 10-15 minutes if it keeps happening."
+        "The request is taking longer than expected (over 3.5 minutes) and was cancelled. This can happen on a cold backend instance, or when the underlying market data providers are temporarily rate-limiting requests. Please try again in a moment, or wait 10-15 minutes if it keeps happening."
       );
     }
     throw new Error(
@@ -114,4 +117,16 @@ export async function analyzeCompany(
 
 export function downloadUrl(path: string): string {
   return `${API_URL}${path}`;
+}
+
+export async function isDownloadReady(path: string): Promise<boolean> {
+  // The backend returns excel_url/pdf_url immediately with the file still
+  // being written in the background - /downloads/{filename} 404s until it
+  // exists, which is exactly the signal DownloadButtons polls on.
+  try {
+    const res = await fetch(downloadUrl(path), { method: "GET", cache: "no-store" });
+    return res.ok;
+  } catch {
+    return false;
+  }
 }

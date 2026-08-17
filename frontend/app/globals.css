@@ -211,6 +211,12 @@ table.data-table td:first-child { font-family: var(--font-body); }
   color: var(--ink);
 }
 .download-btn:hover { background: var(--ink); color: var(--paper); }
+.download-btn-pending {
+  border-style: dashed;
+  color: var(--ink-soft);
+  cursor: default;
+}
+.download-btn-pending:hover { background: none; color: var(--ink-soft); }
 
 /* --- Status --- */
 .status-box {
