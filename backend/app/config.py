@@ -11,8 +11,9 @@ class Settings(BaseSettings):
     supabase_service_key: str = ""
     supabase_db_password: str = ""
 
-    anthropic_api_key: str = ""
-    anthropic_model: str = "claude-haiku-4-5-20251001"
+    cometapi_key: str = ""
+    cometapi_base_url: str = "https://api.cometapi.com/v1"
+    cometapi_model: str = "claude-haiku-4-5-20251001"
 
     indian_api_key: str = ""
     indian_api_base_url: str = "https://stock.indianapi.in"

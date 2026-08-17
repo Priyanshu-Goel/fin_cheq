@@ -29,7 +29,7 @@ the model's own signal accuracy.
                             │  └─────────────────────────┘  │
                             │  ┌─────────────────────────┐  │
                             │  │ rag/                    │  │
-                            │  │  chunk → embed → store   │──┼──► Anthropic Claude API
+                            │  │  chunk → embed → store   │──┼──► CometAPI (Claude proxy)
                             │  │  → retrieve → generate   │  │    (Claude Haiku - cheapest)
                             │  └─────────────────────────┘  │
                             │  ┌─────────────────────────┐  │
@@ -141,7 +141,7 @@ the RAG note, and returns download links for the Excel + PDF.
 3. Build command: `pip install -r requirements.txt`
    Start command: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
 4. Add environment variables from `.env.example` in the Render dashboard
-   (Supabase URL/key, Anthropic API key, optional Indian API key).
+   (Supabase URL/key, CometAPI key, optional Indian API key).
 5. Deploy. You'll get a URL like `https://your-app.onrender.com`.
    Note: Render's free tier sleeps after inactivity — first request after
    idle takes ~30-50s to wake up. Fine for a personal project; upgrade to a
