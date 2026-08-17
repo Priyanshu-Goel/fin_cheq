@@ -3,7 +3,12 @@ Orchestrates a full run for one company:
   1. Resolve symbol -> concurrently fetch 5yr price history (yfinance/NSE) +
      Nifty50 index history + fundamentals (indianapi.in/Screener) + source
      documents (annual report/transcripts) - these are all independent I/O
-     calls, so they run in parallel rather than one after another
+     calls, so they run in parallel rather than one after another. Price
+     history failing is fatal (there's no analysis without it); fundamentals
+     and source documents degrade gracefully to "unavailable" instead of
+     failing the whole request, since both have been observed hard-blocked
+     from some hosts' IPs entirely (see data_sources/*.py docstrings) -
+     price/CAPM/risk/backtest still have real data to work with either way.
   2. Compute ratios, CAPM, risk, red flags, backtest
   3. Chunk + embed source documents, store in Supabase
   4. Retrieve relevant chunks, generate the RAG research note via Claude
@@ -36,7 +41,7 @@ from app.rag.note_generator import generate_research_note
 from app.reports.excel_report import build_excel_report
 from app.reports.pdf_report import build_pdf_report
 
-from app.models import AnalyzeRequest, AnalyzeResponse, PricePoint
+from app.models import AnalyzeRequest, AnalyzeResponse, PricePoint, RedFlag
 from app.config import settings
 from app.db import save_backtest_result
 
@@ -54,22 +59,39 @@ def _resolve_symbol(req: AnalyzeRequest) -> str:
     return guess
 
 
-def _get_fundamentals(nse_symbol: str, company_name: str) -> dict:
-    """Try the cheap paid API first; fall back to the free scraper."""
+_EMPTY_FUNDAMENTALS = {
+    "top_ratios": {}, "profit_loss": {}, "balance_sheet": {}, "cash_flow": {}, "ratios_5yr": {},
+}
+
+
+def _get_fundamentals(nse_symbol: str, company_name: str) -> tuple[dict, bool]:
+    """
+    Try the cheap paid API first; fall back to the free scraper. If both
+    fail - both providers have been observed hard-blocking this host's IP
+    entirely (see data_sources/*.py module docstrings), not just rate-
+    limiting - return an empty shape instead of failing the whole
+    analysis. Ratios/red-flags downstream already treat a missing row as
+    "no data", so this degrades to quant-only output (price history,
+    CAPM, risk, backtest) rather than an all-or-nothing failure.
+    Returns (fundamentals_dict, succeeded).
+    """
     if fundamentals_api_configured():
         try:
             raw = fetch_company_fundamentals(company_name)
-            return normalize_fundamentals(raw)
+            return normalize_fundamentals(raw), True
         except FundamentalsAPIError:
             pass  # fall through to scraper
-    scraped = fetch_all_fundamentals(nse_symbol)
-    return {
-        "top_ratios": scraped["top_ratios"],
-        "profit_loss": scraped["profit_loss"],
-        "balance_sheet": scraped["balance_sheet"],
-        "cash_flow": scraped["cash_flow"],
-        "ratios_5yr": scraped["ratios_5yr"],
-    }
+    try:
+        scraped = fetch_all_fundamentals(nse_symbol)
+        return {
+            "top_ratios": scraped["top_ratios"],
+            "profit_loss": scraped["profit_loss"],
+            "balance_sheet": scraped["balance_sheet"],
+            "cash_flow": scraped["cash_flow"],
+            "ratios_5yr": scraped["ratios_5yr"],
+        }, True
+    except Exception:
+        return _EMPTY_FUNDAMENTALS, False
 
 
 def _build_quant_summary_text(ratios, capm, risk, red_flags, backtest) -> str:
@@ -118,7 +140,7 @@ def run_full_analysis(req: AnalyzeRequest) -> AnalyzeResponse:
 
         price_df = price_future.result()
         index_df = index_future.result()
-        fundamentals = fundamentals_future.result()
+        fundamentals, fundamentals_available = fundamentals_future.result()
         documents = documents_future.result()
     finally:
         pool.shutdown(wait=False)
@@ -138,6 +160,19 @@ def run_full_analysis(req: AnalyzeRequest) -> AnalyzeResponse:
         fundamentals.get("cash_flow", {}),
         fundamentals.get("profit_loss", {}),
     )
+    if not fundamentals_available:
+        # Otherwise detect_red_flags's own "nothing crossed the thresholds"
+        # fallback message reads as a clean bill of health, when really no
+        # data was checked at all - say so plainly instead.
+        red_flags.insert(0, RedFlag(
+            severity="Medium",
+            title="Fundamentals data unavailable",
+            detail="Both the fundamentals API and the Screener.in scraper "
+                   "failed for this company, so the ratio trends and "
+                   "red-flag checks above reflect an absence of data, not "
+                   "a clean bill of health. Price history, CAPM, risk, "
+                   "and backtest results are unaffected.",
+        ))
     backtest_result = run_backtest_adaptive(
         price_df, index_df, years_ago=settings.backtest_years_ago
     )

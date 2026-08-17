@@ -55,8 +55,18 @@ def fetch_source_documents(nse_symbol: str, max_docs: int = 5) -> list[dict]:
     that fail to download/parse (scanned/corrupt PDFs, dead links, etc.)
     rather than failing the whole run.
     """
+    try:
+        links = list_document_links(nse_symbol)[:max_docs]
+    except Exception:
+        # screener.in itself unreachable (observed: connections actively
+        # refused from some hosts) - no source documents rather than
+        # failing the whole analysis. note_generator.py already handles
+        # an empty chunk list by grounding only in the quantitative
+        # outputs instead of retrieved excerpts.
+        return []
+
     docs = []
-    for link in list_document_links(nse_symbol)[:max_docs]:
+    for link in links:
         try:
             text = extract_pdf_text(link["url"])
             if text.strip():
