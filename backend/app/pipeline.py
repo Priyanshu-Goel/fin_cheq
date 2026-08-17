@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from app.data_sources import price_data
 from app.data_sources.fundamentals_api import (
-    fetch_company_fundamentals, normalize_fundamentals,
+    fetch_company_fundamentals,
     is_configured as fundamentals_api_configured, FundamentalsAPIError,
 )
 from app.data_sources.screener_scraper import fetch_all_fundamentals
@@ -66,19 +66,18 @@ _EMPTY_FUNDAMENTALS = {
 
 def _get_fundamentals(nse_symbol: str, company_name: str) -> tuple[dict, bool]:
     """
-    Try the cheap paid API first; fall back to the free scraper. If both
-    fail - both providers have been observed hard-blocking this host's IP
-    entirely (see data_sources/*.py module docstrings), not just rate-
-    limiting - return an empty shape instead of failing the whole
-    analysis. Ratios/red-flags downstream already treat a missing row as
-    "no data", so this degrades to quant-only output (price history,
-    CAPM, risk, backtest) rather than an all-or-nothing failure.
-    Returns (fundamentals_dict, succeeded).
+    Try the cheap paid API first; fall back to the free scraper - both
+    return the identical {top_ratios, profit_loss, balance_sheet,
+    cash_flow, ratios_5yr} shape, so no separate normalization step is
+    needed either way. If both fail, return an empty shape instead of
+    failing the whole analysis: ratios/red-flags downstream already treat
+    a missing row as "no data", so this degrades to quant-only output
+    (price history, CAPM, risk, backtest) rather than an all-or-nothing
+    failure. Returns (fundamentals_dict, succeeded).
     """
     if fundamentals_api_configured():
         try:
-            raw = fetch_company_fundamentals(company_name)
-            return normalize_fundamentals(raw), True
+            return fetch_company_fundamentals(company_name), True
         except FundamentalsAPIError:
             pass  # fall through to scraper
     try:
