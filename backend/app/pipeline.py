@@ -102,7 +102,15 @@ def run_full_analysis(req: AnalyzeRequest) -> AnalyzeResponse:
     # independent I/O calls - fetching them one after another was pure
     # wasted wall-clock (each can take tens of seconds against
     # slow/rate-limited providers). Run them concurrently instead.
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    #
+    # Deliberately not a `with ThreadPoolExecutor(...) as pool:` block:
+    # its __exit__ calls shutdown(wait=True), so if e.g. price_future
+    # raises first, exiting the `with` still blocks until every other
+    # future finishes too - tacking their full duration onto a request
+    # that's already failed. shutdown(wait=False) in `finally` lets the
+    # error surface as soon as the first future raises.
+    pool = ThreadPoolExecutor(max_workers=4)
+    try:
         price_future = pool.submit(price_data.fetch_daily_history, nse_symbol, req.exchange, 5)
         index_future = pool.submit(price_data.fetch_index_history, years=5)
         fundamentals_future = pool.submit(_get_fundamentals, nse_symbol, req.company_name)
@@ -112,6 +120,8 @@ def run_full_analysis(req: AnalyzeRequest) -> AnalyzeResponse:
         index_df = index_future.result()
         fundamentals = fundamentals_future.result()
         documents = documents_future.result()
+    finally:
+        pool.shutdown(wait=False)
 
     stock_returns = price_data.daily_returns(price_df)
     market_returns = price_data.daily_returns(index_df)
