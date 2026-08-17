@@ -1,4 +1,5 @@
 import os
+import traceback
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -30,7 +31,16 @@ def analyze(req: AnalyzeRequest):
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:  # noqa: BLE001 - surfaced to the user as a 500 with detail
-        raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}")
+        # Exception type + the deepest frame (file:line:function) it was
+        # raised from, not just str(exc) - a bare message alone has proven
+        # genuinely ambiguous to debug (multiple external APIs in this app
+        # can independently produce near-identical wording).
+        last_frame = traceback.extract_tb(exc.__traceback__)[-1]
+        origin = f"{os.path.basename(last_frame.filename)}:{last_frame.lineno} in {last_frame.name}()"
+        raise HTTPException(
+            status_code=500,
+            detail=f"Analysis failed: {type(exc).__name__}: {exc} (raised from {origin})",
+        )
 
 
 @app.get("/downloads/{filename}")
