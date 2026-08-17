@@ -24,7 +24,6 @@ actual data call - this mimics what a real browser does and is why a bare
 from datetime import datetime, timedelta
 import pandas as pd
 import requests
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 BASE_URL = "https://www.nseindia.com"
 HEADERS = {
@@ -35,7 +34,6 @@ HEADERS = {
 }
 
 
-@retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=2, min=2, max=6), reraise=True)
 def _bootstrap_session() -> requests.Session:
     """
     Deliberately NOT cached/shared across calls: requests.Session wraps a
@@ -47,9 +45,15 @@ def _bootstrap_session() -> requests.Session:
     session in price_data.py. A fresh handshake per call costs 2 extra
     requests but guarantees correctness.
 
-    Kept to 2 attempts / a short backoff, not more: this runs racing
-    against Yahoo Finance, so a stubborn retry budget here just delays
-    surfacing an error the concurrent Yahoo attempt may already be past.
+    Deliberately no per-call retry decorator here (there used to be one):
+    this already runs inside price_data._year_ladder's 4 window sizes,
+    each racing against Yahoo - a real block doesn't clear up between two
+    retries a few seconds apart, so an inner retry here only compounds
+    with the outer ladder (observed: 4 windows * 2 attempts * 10s hit
+    ~110s+ and tripped Render's own gateway timeout - a 502 from Render's
+    infra, not a clean error from this app). One attempt per window,
+    with the ladder+race providing the actual redundancy, keeps worst-
+    case latency bounded enough to always return a real response.
     """
     session = requests.Session()
     session.headers.update(HEADERS)
@@ -70,8 +74,8 @@ def _chunk_date_ranges(start: datetime, end: datetime, chunk_days: int = 364):
         current = chunk_end + timedelta(days=1)
 
 
-@retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=2, min=2, max=8), reraise=True)
 def _fetch_chunk(session: requests.Session, symbol: str, start: datetime, end: datetime) -> list[dict]:
+    """No retry decorator - see _bootstrap_session's docstring for why."""
     url = f"{BASE_URL}/api/historical/cm/equity"
     params = {
         "symbol": symbol,
