@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
 import CompanySearch from "../components/CompanySearch";
 import SignalStrip from "../components/SignalStrip";
 import RatioTable from "../components/RatioTable";
@@ -96,7 +97,9 @@ export default function Home() {
 
           <div className="section">
             <h2>Research Note</h2>
-            <p className="note-text">{data.summary}</p>
+            <div className="note-text">
+              <ReactMarkdown>{data.summary}</ReactMarkdown>
+            </div>
           </div>
 
           <div className="section">

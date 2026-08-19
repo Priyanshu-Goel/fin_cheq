@@ -1,7 +1,17 @@
 """
 Builds the downloadable Excel workbook: Summary, 5-Year Ratios, CAPM & Risk,
-Red Flags, Backtest, and Raw Price Data sheets - the kind of structure a
-banking analyst would expect to open and immediately navigate.
+Red Flags, Backtest, Profit & Loss, Balance Sheet, Cash Flow, All Ratios
+(Raw), and Raw Price Data sheets - the kind of structure a banking analyst
+would expect to open and immediately navigate.
+
+The Profit & Loss / Balance Sheet / Cash Flow / All Ratios sheets are the
+*raw* tables fetched from indianapi.in/Screener ({row_label: {period:
+value}}), not just the handful of curated metrics analysis/ratios.py
+derives from them - the "5-Year Ratios" sheet only ever shows the named
+metrics ratios.py knows to look for (ROE %, Debt to Equity, etc.); the raw
+tables carry everything else that was actually fetched (Sales, Net Profit,
+Debtor Days, Cash from Operating Activity, and so on) but had nowhere to
+go before this.
 """
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
@@ -32,7 +42,31 @@ def _autofit(ws, num_cols: int):
         ws.column_dimensions[get_column_letter(col)].width = min(max_len + 3, 45)
 
 
-def build_excel_report(analysis: AnalyzeResponse, price_df: pd.DataFrame, output_path: str) -> str:
+def _add_raw_table_sheet(wb: Workbook, title: str, table: dict) -> None:
+    """
+    Renders a raw {row_label: {period: value}} table (the shape both
+    fundamentals_api.py and screener_scraper.py produce) as its own sheet:
+    one row per label, one column per period, sorted chronologically.
+    Adds a near-empty placeholder sheet rather than skipping entirely when
+    `table` is empty, so it's visibly "no data" rather than looking like
+    the sheet was forgotten.
+    """
+    ws = wb.create_sheet(title)
+    if not table:
+        ws["A1"] = "No data available for this table."
+        return
+
+    all_periods = sorted({period for row in table.values() for period in row})
+    ws.append(["Metric", *all_periods])
+    _style_header_row(ws, 1, len(all_periods) + 1)
+    for label, row in table.items():
+        ws.append([label, *[row.get(p, "") for p in all_periods]])
+    _autofit(ws, len(all_periods) + 1)
+
+
+def build_excel_report(
+    analysis: AnalyzeResponse, price_df: pd.DataFrame, fundamentals: dict, output_path: str
+) -> str:
     wb = Workbook()
 
     # --- Summary sheet ---
@@ -55,8 +89,9 @@ def build_excel_report(analysis: AnalyzeResponse, price_df: pd.DataFrame, output
     ws["B16"] = analysis.capm.beta
     _autofit(ws, 8)
 
-    # --- Ratios sheet ---
-    ws2 = wb.create_sheet("5-Year Ratios")
+    # --- Ratios sheet (curated: only the named metrics ratios.py derives -
+    # see "All Ratios (Raw)" below for everything else that was fetched) ---
+    ws2 = wb.create_sheet("Key Ratios (Curated)")
     all_years = sorted({yr for r in analysis.ratios for yr in r.values_by_year})
     ws2.append(["Metric", *all_years, "Trend"])
     _style_header_row(ws2, 1, len(all_years) + 2)
@@ -113,6 +148,13 @@ def build_excel_report(analysis: AnalyzeResponse, price_df: pd.DataFrame, output
     ws5.append(["Note: this backtests the model's own CAPM-signal methodology "
                 "against realized outcomes - it is not a trading-strategy P&L backtest."])
     _autofit(ws5, 2)
+
+    # --- Full fundamentals sheets (raw, as fetched - everything the
+    # curated "Key Ratios" sheet above didn't have a named metric for) ---
+    _add_raw_table_sheet(wb, "All Ratios (Raw)", fundamentals.get("ratios_5yr", {}))
+    _add_raw_table_sheet(wb, "Profit & Loss", fundamentals.get("profit_loss", {}))
+    _add_raw_table_sheet(wb, "Balance Sheet", fundamentals.get("balance_sheet", {}))
+    _add_raw_table_sheet(wb, "Cash Flow", fundamentals.get("cash_flow", {}))
 
     # --- Raw Price Data sheet ---
     ws6 = wb.create_sheet("Raw Price Data (5yr)")

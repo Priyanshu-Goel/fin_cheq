@@ -21,6 +21,7 @@ homepage with browser-like headers, then reusing that session for the
 actual data call - this mimics what a real browser does and is why a bare
 `requests.get` on the API URL alone returns 401/403.
 """
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 import pandas as pd
 import requests
@@ -74,8 +75,18 @@ def _chunk_date_ranges(start: datetime, end: datetime, chunk_days: int = 364):
         current = chunk_end + timedelta(days=1)
 
 
-def _fetch_chunk(session: requests.Session, symbol: str, start: datetime, end: datetime) -> list[dict]:
-    """No retry decorator - see _bootstrap_session's docstring for why."""
+def _fetch_equity_chunk(cookies, headers, symbol: str, start: datetime, end: datetime) -> list[dict]:
+    """
+    Takes cookies/headers rather than a live requests.Session so callers
+    can run many of these concurrently (see fetch_daily_history_nse) -
+    fetching a 5-year pull's ~5-6 one-year chunks one at a time in a
+    for-loop was a real, uncaught serial bottleneck (each chunk can take
+    several seconds, so a full sequential pull added 20-40s+ on top of
+    everything else). Sharing the live Session object itself across
+    threads would reintroduce the exact cookiejar-mutation bug already
+    fixed once in this module; passing its already-established cookies
+    to independent plain `requests.get` calls avoids that entirely.
+    """
     url = f"{BASE_URL}/api/historical/cm/equity"
     params = {
         "symbol": symbol,
@@ -83,35 +94,42 @@ def _fetch_chunk(session: requests.Session, symbol: str, start: datetime, end: d
         "from": start.strftime("%d-%m-%Y"),
         "to": end.strftime("%d-%m-%Y"),
     }
-    resp = session.get(url, params=params, timeout=10)
+    resp = requests.get(url, params=params, cookies=cookies, headers=headers, timeout=10)
     resp.raise_for_status()
-    payload = resp.json()
-    return payload.get("data", [])
+    return resp.json().get("data", [])
+
+
+def _fetch_index_chunk(cookies, headers, index_symbol: str, start: datetime, end: datetime) -> list[dict]:
+    url = f"{BASE_URL}/api/historical/indicesHistory"
+    params = {
+        "indexType": index_symbol,
+        "from": start.strftime("%d-%m-%Y"),
+        "to": end.strftime("%d-%m-%Y"),
+    }
+    resp = requests.get(url, params=params, cookies=cookies, headers=headers, timeout=10)
+    resp.raise_for_status()
+    return resp.json().get("data", {}).get("indexCloseOnlineRecords", [])
 
 
 def fetch_index_history_nse(index_symbol: str = "NIFTY 50", years: int = 5) -> pd.DataFrame:
     """
     NSE's own index-history endpoint - fallback for fetch_index_history in
     price_data.py when Yahoo Finance's ^NSEI series is blocked. Same session
-    bootstrap approach as the equity endpoint above.
+    bootstrap approach as the equity endpoint above, but chunks are fetched
+    concurrently once the session's cookies are established (see
+    _fetch_equity_chunk's docstring for why that's safe).
     """
     session = _bootstrap_session()
+    cookies, headers = session.cookies, dict(session.headers)
     end = datetime.today()
     start = end - timedelta(days=365 * years + 30)
+    chunks = list(_chunk_date_ranges(start, end))
 
-    all_rows = []
-    for chunk_start, chunk_end in _chunk_date_ranges(start, end):
-        url = f"{BASE_URL}/api/historical/indicesHistory"
-        params = {
-            "indexType": index_symbol,
-            "from": chunk_start.strftime("%d-%m-%Y"),
-            "to": chunk_end.strftime("%d-%m-%Y"),
-        }
-        resp = session.get(url, params=params, timeout=15)
-        resp.raise_for_status()
-        payload = resp.json()
-        rows = payload.get("data", {}).get("indexCloseOnlineRecords", [])
-        all_rows.extend(rows)
+    with ThreadPoolExecutor(max_workers=min(8, len(chunks))) as pool:
+        chunk_results = pool.map(
+            lambda ce: _fetch_index_chunk(cookies, headers, index_symbol, ce[0], ce[1]), chunks
+        )
+        all_rows = [row for rows in chunk_results for row in rows]
 
     if not all_rows:
         raise ValueError(f"NSE returned no index history for {index_symbol}.")
@@ -130,14 +148,17 @@ def fetch_daily_history_nse(symbol: str, years: int = 5) -> pd.DataFrame:
     """
     symbol = symbol.upper().replace(".NS", "").replace(".BO", "").strip()
     session = _bootstrap_session()
+    cookies, headers = session.cookies, dict(session.headers)
 
     end = datetime.today()
     start = end - timedelta(days=365 * years + 30)
+    chunks = list(_chunk_date_ranges(start, end))
 
-    all_rows = []
-    for chunk_start, chunk_end in _chunk_date_ranges(start, end):
-        rows = _fetch_chunk(session, symbol, chunk_start, chunk_end)
-        all_rows.extend(rows)
+    with ThreadPoolExecutor(max_workers=min(8, len(chunks))) as pool:
+        chunk_results = pool.map(
+            lambda ce: _fetch_equity_chunk(cookies, headers, symbol, ce[0], ce[1]), chunks
+        )
+        all_rows = [row for rows in chunk_results for row in rows]
 
     if not all_rows:
         raise ValueError(

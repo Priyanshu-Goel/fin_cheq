@@ -144,8 +144,21 @@ button:focus-visible, input:focus-visible {
   font-size: 15px;
   line-height: 1.7;
   color: #1A202C;
-  white-space: pre-wrap;
 }
+.note-text h1, .note-text h2, .note-text h3 {
+  font-weight: 700;
+  margin: 20px 0 8px;
+  line-height: 1.3;
+}
+.note-text h1 { font-size: 20px; }
+.note-text h2 { font-size: 17px; }
+.note-text h3 { font-size: 15px; text-transform: uppercase; letter-spacing: 0.03em; }
+.note-text h1:first-child, .note-text h2:first-child, .note-text h3:first-child { margin-top: 0; }
+.note-text p { margin: 0 0 12px; }
+.note-text ul, .note-text ol { margin: 0 0 12px; padding-left: 22px; }
+.note-text li { margin-bottom: 4px; }
+.note-text strong { font-weight: 700; }
+.note-text hr { border: none; border-top: 1px solid var(--rule); margin: 16px 0; }
 
 /* --- Tables --- */
 table.data-table {

@@ -256,14 +256,16 @@ def run_full_analysis(req: AnalyzeRequest) -> tuple[AnalyzeResponse, tuple]:
         pdf_url=f"/downloads/{os.path.basename(pdf_path)}",
     )
 
-    report_job = (analysis, price_df, note_text, excel_path, pdf_path)
+    report_job = (analysis, price_df, fundamentals, note_text, excel_path, pdf_path)
     return analysis, report_job
 
 
-def build_reports(analysis: AnalyzeResponse, price_df, note_text: str, excel_path: str, pdf_path: str) -> None:
+def build_reports(
+    analysis: AnalyzeResponse, price_df, fundamentals: dict, note_text: str, excel_path: str, pdf_path: str
+) -> None:
     """Writes the Excel workbook and PDF note to disk. Run as a FastAPI
     BackgroundTask (see main.py) so it happens after the response - the
     files simply don't exist at the predicted paths until this finishes,
     and /downloads/{filename} 404s until then."""
-    build_excel_report(analysis, price_df, excel_path)
+    build_excel_report(analysis, price_df, fundamentals, excel_path)
     build_pdf_report(analysis, note_text, pdf_path)

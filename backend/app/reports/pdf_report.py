@@ -1,8 +1,10 @@
 """
-Generates a professional PDF research note - the qualitative Claude-written
+Generates a professional PDF research note - the qualitative LLM-written
 note up front, followed by the quantitative tables, styled to resemble a
 sell-side research note layout (banner header, section rules, tables).
 """
+import html
+import re
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -17,7 +19,56 @@ styles = getSampleStyleSheet()
 TITLE_STYLE = ParagraphStyle("TitleCustom", parent=styles["Title"], fontSize=18, spaceAfter=4)
 SUBTITLE_STYLE = ParagraphStyle("Subtitle", parent=styles["Normal"], fontSize=10, textColor=colors.grey)
 SECTION_STYLE = ParagraphStyle("Section", parent=styles["Heading2"], spaceBefore=14, spaceAfter=6)
+SUBSECTION_STYLE = ParagraphStyle("Subsection", parent=styles["Heading3"], fontSize=11, spaceBefore=10, spaceAfter=4)
 BODY_STYLE = ParagraphStyle("Body", parent=styles["Normal"], fontSize=10, leading=14)
+
+
+def _inline_markdown_to_reportlab(text: str) -> str:
+    """
+    Escapes the text for reportlab's strict mini-XML paragraph markup,
+    then re-introduces just **bold** as <b>...</b> - the only inline
+    markdown the LLM note actually uses. Escaping first (not after)
+    matters: without it, a stray '<' or '&' in the note breaks reportlab's
+    parser outright instead of just looking like unstyled text.
+    """
+    escaped = html.escape(text, quote=False)
+    return re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
+
+
+def _markdown_to_flowables(markdown_text: str) -> list:
+    """
+    Lightweight markdown -> reportlab flowables for the LLM-written note.
+    Not a full CommonMark implementation - just enough for the small,
+    predictable subset note_generator.py's prompt actually produces
+    (# / ## / ### headings, **bold** section titles on their own line,
+    --- rules, blank-line-separated paragraphs) so literal '#' and '**'
+    characters don't show up verbatim in the PDF the way they used to.
+    """
+    elements = []
+    for block in markdown_text.split("\n\n"):
+        block = block.strip()
+        if not block:
+            continue
+        if block in ("---", "***", "___"):
+            elements.append(HRFlowable(
+                width="100%", thickness=0.75, color=colors.HexColor("#CCCCCC"),
+                spaceBefore=4, spaceAfter=8,
+            ))
+            continue
+
+        heading_match = re.match(r"^(#{1,3})\s+(.*)", block)
+        bold_line_match = None if heading_match else re.match(r"^\*\*(.+)\*\*$", block)
+        if heading_match:
+            hashes, heading_text = heading_match.groups()
+            style = SECTION_STYLE if len(hashes) == 1 else SUBSECTION_STYLE
+            elements.append(Paragraph(_inline_markdown_to_reportlab(heading_text), style))
+        elif bold_line_match:
+            elements.append(Paragraph(_inline_markdown_to_reportlab(bold_line_match.group(1)), SUBSECTION_STYLE))
+        else:
+            body_html = _inline_markdown_to_reportlab(block).replace("\n", "<br/>")
+            elements.append(Paragraph(body_html, BODY_STYLE))
+            elements.append(Spacer(1, 6))
+    return elements
 
 
 def _table(data: list[list], col_widths=None) -> Table:
@@ -49,11 +100,8 @@ def build_pdf_report(analysis: AnalyzeResponse, research_note_text: str, output_
     ))
     elements.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#1F2937"), spaceBefore=8, spaceAfter=10))
 
-    # Research note body (Claude-generated, grounded in retrieved sources)
-    for paragraph in research_note_text.split("\n\n"):
-        if paragraph.strip():
-            elements.append(Paragraph(paragraph.strip().replace("\n", "<br/>"), BODY_STYLE))
-            elements.append(Spacer(1, 6))
+    # Research note body (LLM-generated, grounded in retrieved sources)
+    elements.extend(_markdown_to_flowables(research_note_text))
 
     # CAPM & Risk table
     elements.append(Paragraph("CAPM &amp; Risk Metrics", SECTION_STYLE))

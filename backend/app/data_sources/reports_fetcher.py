@@ -15,6 +15,7 @@ extractor to keep this dependency-light; swap in the `pdf` skill's approach
 if you need OCR for scanned reports.
 """
 import io
+from concurrent.futures import ThreadPoolExecutor
 import requests
 from bs4 import BeautifulSoup
 from PyPDF2 import PdfReader
@@ -65,12 +66,19 @@ def fetch_source_documents(nse_symbol: str, max_docs: int = 5) -> list[dict]:
         # outputs instead of retrieved excerpts.
         return []
 
-    docs = []
-    for link in links:
+    # Each of these is an independent download + PDF parse (up to 30s
+    # timeout apiece) - fetching them one at a time in a for-loop was a
+    # real serial bottleneck whenever screener.in actually responds.
+    def _fetch_one(link: dict) -> dict | None:
         try:
             text = extract_pdf_text(link["url"])
             if text.strip():
-                docs.append({"source": "screener_documents", **link, "text": text})
+                return {"source": "screener_documents", **link, "text": text}
         except Exception:
-            continue  # skip unreadable documents, don't fail the whole ingestion
+            pass  # skip unreadable documents, don't fail the whole ingestion
+        return None
+
+    with ThreadPoolExecutor(max_workers=min(5, len(links)) or 1) as pool:
+        results = pool.map(_fetch_one, links)
+        docs = [doc for doc in results if doc is not None]
     return docs
